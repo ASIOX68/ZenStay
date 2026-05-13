@@ -1,0 +1,45 @@
+{
+  "summary": "ZenStay iteration 4 backend tests — host emails on reservation creation + payment, invoice number generation, idempotent _mark_reservation_paid_and_notify. 39/39 pytest tests pass (27 regression iter1+2+3, 12 new iter4). All contracts verified: invoice_number matches ZS-YYYYMM-XXXXXX (6 hex), helper is idempotent (second/third call yields same invoice_number), helper does NOT raise when reservation or listing missing, send_host_notification(event in {new,paid}) swallows Resend failures, POST /api/reservations still returns 200 with statut=pending and no invoice_number (fires host 'new' email best-effort), GET /api/reservations/me and GET /api/admin/reservations both expose invoice_number after payment finalize.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "_mark_reservation_paid_and_notify", "issue": "Concurrent-race contract is partial: the conditional $or update prevents duplicate invoice_number assignment, but BOTH callers proceed to send_booking_confirmation + send_host_notification(paid) after re-fetch — emails can be sent twice under a true concurrent race (Stripe webhook + /payments/status poll arriving within ms). The sequential idempotency check at the top of the function only catches the second call AFTER the first has completed. Mitigation idea: use update_one().matched_count to decide whether to send emails — only the winning writer sends. Today this is mostly hypothetical since Stripe webhooks are usually faster than the 5s poll, but worth tightening."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_zenstay.py",
+    "/app/backend/tests/test_zenstay_iter3.py",
+    "/app/backend/tests/test_zenstay_iter4.py",
+    "/app/test_reports/pytest/zs_iter4_results.xml",
+    "/app/test_reports/pytest/zs_iter4_full.xml",
+    "/app/test_reports/pytest/zs_iter4_regression.xml"
+  ],
+  "action_items": [
+    "Optional hardening: in _mark_reservation_paid_and_notify, capture update_one().matched_count and skip the email-send branch when matched_count == 0 (i.e. another caller won the race), to make email delivery strictly idempotent under concurrent webhook+poll.",
+    "Optional cleanup (carried from iter3): convert `return rid` in test_reservation_create_and_list to assert; migrate FastAPI @app.on_event to lifespan handlers (deprecation warnings only)."
+  ],
+  "critical_code_review_comments": [
+    "_generate_invoice_number uses uuid4().hex[:6].upper() → 16^6 = 16.7M combinations per month. Collision probability low but non-zero; acceptable for current volume. If volume grows, switch to a monthly counter via a MongoDB findOneAndUpdate on a counters collection.",
+    "_mark_reservation_paid_and_notify: the conditional MongoDB filter `{$or: [{invoice_number: None}, {invoice_number: {$exists: False}}]}` correctly enforces single invoice assignment under concurrency. However the function then re-fetches and ALWAYS sends emails when invoice_number is set — this means a losing concurrent caller will still send the client invoice + host 'paid' email a second time. Recommend gating on matched_count of the conditional update.",
+    "send_host_notification short-circuits when listing.hote_email is missing — good, prevents Resend errors on listings without host email.",
+    "_resend_send wraps Resend in try/except and only logs warnings — correctly best-effort, never raises into the request lifecycle. Confirmed via unit tests with non-deliverable test addresses (Resend sandbox would reject 'host_TEST_ZS4@example.com' but no exception propagates).",
+    "Reservation pydantic model adds invoice_number: Optional[str] = None — backward compatible; existing tests reading reservations without this field still work because GET endpoints just return the stored doc (Mongo doc lacks the field on pending reservations and that's fine).",
+    "create_reservation now awaits send_host_notification inline before returning the HTTP response. This adds latency to the request equal to the Resend HTTP call (≈ 200–500ms typically). If Resend is slow/down, the response is delayed up to the resend SDK timeout. Consider moving to a BackgroundTasks or fire-and-forget asyncio.create_task to keep p99 latency low. (Not a bug — design choice.)",
+    "Email HTML in _email_shell is well-structured and inline-styled (good for email clients). Hard-coded brand colors are fine for v1."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_zenstay_iter4.py (new — 12 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (39/39 — 16 iter1+2 + 11 iter3 + 12 iter4)",
+    "frontend": "not tested this iteration (backend-only request)"
+  },
+  "test_credentials": "Session tokens seeded by fixture: test_admin_session_zs4 (admin@zenstay.com), test_user_session_zs4 (alice@zenstay.com). Auto-cleaned at module teardown.",
+  "seed_data_creation": "iter4 fixtures create transient listings prefixed `test-zs4-*` and reservations with name prefix `TEST_ZS4`. All cleaned up per-test in finally blocks and at module teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Three pytest files now cover the backend: test_zenstay.py (16), test_zenstay_iter3.py (11), test_zenstay_iter4.py (12) = 39 tests total. Run with `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/results.xml`. Each iter uses distinct session tokens (test_*_session_zs / _zs3 / _zs4) so they don't collide. Resend emails to test addresses fail at the provider but the _resend_send helper swallows the exception. The only soft contract gap is duplicate email send under a tight concurrent race between Stripe webhook and /payments/status poll — see action_items. Invoice number format ZS-YYYYMM-XXXXXX where XXXXXX is 6 uppercase hex chars (regex ^ZS-\\d{6}-[0-9A-F]{6}$).",
+  "rca of the issue": "No bugs found this iteration. One design-level minor noted: emails can be sent twice under a concurrent webhook+poll race because the function sends emails based on a re-fetched doc rather than on the conditional update's matched_count. Suggested fix in action_items."
+}

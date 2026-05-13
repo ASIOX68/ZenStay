@@ -104,53 +104,151 @@ def _format_eur(v: float) -> str:
     return f"{v:,.2f}".replace(",", " ").replace(".", ",")
 
 
-async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[str, Any]) -> None:
+def _nights_count(date_arrivee: str, date_depart: str) -> int:
+    try:
+        a = datetime.fromisoformat(date_arrivee)
+        b = datetime.fromisoformat(date_depart)
+        return max(1, (b.date() - a.date()).days)
+    except Exception:
+        return 1
+
+
+def _generate_invoice_number() -> str:
+    now = datetime.now(timezone.utc)
+    return f"ZS-{now.year}{now.month:02d}-{uuid.uuid4().hex[:6].upper()}"
+
+
+async def _resend_send(to_email: str, subject: str, html: str) -> None:
     if not RESEND_API_KEY:
-        logger.info("RESEND_API_KEY missing — skipping confirmation email")
+        logger.info(f"RESEND_API_KEY missing — skip email to {to_email}")
         return
-    subject = f"ZenStay — séjour confirmé · {listing.get('titre', '')}"
-    total = _format_eur(float(reservation.get("montant", 0)))
-    html = f"""
+    try:
+        await asyncio.to_thread(
+            resend.Emails.send,
+            {"from": SENDER_EMAIL, "to": [to_email], "subject": subject, "html": html},
+        )
+        logger.info(f"Resend → {to_email} · {subject}")
+    except Exception as e:
+        logger.warning(f"Resend send failed to {to_email}: {e}")
+
+
+def _email_shell(title: str, intro: str, rows_html: str, footer: str) -> str:
+    return f"""
     <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#FAF9F6;font-family:Helvetica,Arial,sans-serif;color:#1A1C1A">
       <tr><td align="center" style="padding:40px 20px">
-        <table width="560" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #E2E0D8;border-radius:14px">
+        <table width="600" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #E2E0D8;border-radius:14px">
           <tr><td style="padding:32px 32px 16px 32px">
             <p style="font-size:11px;letter-spacing:0.25em;text-transform:uppercase;color:#4A7C59;margin:0 0 10px 0">ZenStay</p>
-            <h1 style="font-family:Georgia,serif;font-weight:500;font-size:30px;line-height:1.15;margin:0 0 8px 0">Séjour confirmé</h1>
-            <p style="font-size:15px;color:#6B726B;margin:0 0 24px 0">Merci {reservation.get('name','')}. Votre paiement a été reçu — le silence vous attend.</p>
+            <h1 style="font-family:Georgia,serif;font-weight:500;font-size:28px;line-height:1.15;margin:0 0 8px 0">{title}</h1>
+            <p style="font-size:14px;color:#6B726B;margin:0 0 20px 0">{intro}</p>
           </td></tr>
-          <tr><td style="padding:0 32px 24px 32px">
-            <table width="100%" cellpadding="10" cellspacing="0" border="0" style="background:#F0EFEA;border-radius:10px;font-size:14px">
-              <tr><td style="color:#6B726B">Séjour</td><td align="right">{listing.get('titre','')}</td></tr>
-              <tr><td style="color:#6B726B">Lieu</td><td align="right">{listing.get('ville','')}, {listing.get('pays','')}</td></tr>
-              <tr><td style="color:#6B726B">Arrivée</td><td align="right">{reservation.get('date_arrivee','')}</td></tr>
-              <tr><td style="color:#6B726B">Départ</td><td align="right">{reservation.get('date_depart','')}</td></tr>
-              <tr><td style="color:#6B726B">Voyageurs</td><td align="right">{reservation.get('voyageurs','')}</td></tr>
-              <tr><td style="color:#6B726B;border-top:1px solid #E2E0D8;padding-top:10px">Total payé</td>
-                  <td align="right" style="border-top:1px solid #E2E0D8;padding-top:10px;font-weight:600">{total} €</td></tr>
+          <tr><td style="padding:0 32px 20px 32px">
+            <table width="100%" cellpadding="10" cellspacing="0" border="0" style="background:#F0EFEA;border-radius:10px;font-size:13px">
+              {rows_html}
             </table>
           </td></tr>
-          <tr><td style="padding:0 32px 32px 32px;font-size:13px;color:#6B726B">
-            <p style="margin:0 0 8px 0">Les coordonnées exactes de votre hôte vous seront transmises 24h avant l'arrivée.</p>
-            <p style="margin:0">Bon repos.<br/>— L'équipe ZenStay</p>
+          <tr><td style="padding:0 32px 32px 32px;font-size:12px;color:#6B726B;line-height:1.6">
+            {footer}
           </td></tr>
         </table>
       </td></tr>
     </table>
     """
-    try:
-        await asyncio.to_thread(
-            resend.Emails.send,
-            {
-                "from": SENDER_EMAIL,
-                "to": [reservation["email"]],
-                "subject": subject,
-                "html": html,
-            },
+
+
+def _kv(label: str, value: str, *, strong: bool = False, sep: bool = False) -> str:
+    border = "border-top:1px solid #E2E0D8;padding-top:10px;" if sep else ""
+    weight = "font-weight:600;" if strong else ""
+    return (
+        f"<tr><td style='color:#6B726B;{border}'>{label}</td>"
+        f"<td align='right' style='{border}{weight}'>{value}</td></tr>"
+    )
+
+
+async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[str, Any]) -> None:
+    """Client invoice email — sent after Stripe payment is paid."""
+    total = _format_eur(float(reservation.get("montant", 0)))
+    nights = _nights_count(reservation.get("date_arrivee", ""), reservation.get("date_depart", ""))
+    invoice_no = reservation.get("invoice_number") or _generate_invoice_number()
+    issued = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    prix_nuit = float(listing.get("prix_nuit", 0))
+    subject = f"ZenStay — facture {invoice_no} · {listing.get('titre', '')}"
+    rows = (
+        _kv("Facture n°", invoice_no, strong=True)
+        + _kv("Émise le", issued)
+        + _kv("Bénéficiaire", reservation.get("name", ""))
+        + _kv("Email", reservation.get("email", ""))
+        + _kv("Séjour", listing.get("titre", ""), sep=True)
+        + _kv("Lieu", f"{listing.get('ville','')}, {listing.get('pays','')}")
+        + _kv("Arrivée", reservation.get("date_arrivee", ""))
+        + _kv("Départ", reservation.get("date_depart", ""))
+        + _kv("Voyageurs", str(reservation.get("voyageurs", "")))
+        + _kv(f"Tarif · {nights} × {_format_eur(prix_nuit)} €", f"{_format_eur(prix_nuit * nights)} €", sep=True)
+        + _kv("Total payé TTC", f"{total} €", strong=True, sep=True)
+    )
+    footer = (
+        "<p style='margin:0 0 8px 0'>Les coordonnées exactes de votre hôte vous seront transmises 24h avant l'arrivée.</p>"
+        "<p style='margin:0 0 8px 0;color:#A1A6A1;font-size:11px'>"
+        "Conservez ce document — il vaut facture. Aucune TVA appliquée (régime exonéré loueur particulier)."
+        "</p>"
+        "<p style='margin:0'>Bon repos.<br/>— L'équipe ZenStay</p>"
+    )
+    html = _email_shell(
+        title="Paiement reçu — séjour confirmé",
+        intro=f"Merci {reservation.get('name','')}. Voici votre confirmation et votre facture.",
+        rows_html=rows,
+        footer=footer,
+    )
+    await _resend_send(reservation["email"], subject, html)
+
+
+async def send_host_notification(
+    reservation: Dict[str, Any], listing: Dict[str, Any], event: str
+) -> None:
+    """Host email — event in {'new','paid'}.
+    'new'  = traveler created a reservation (payment pending)
+    'paid' = Stripe payment succeeded
+    """
+    host_email = listing.get("hote_email")
+    if not host_email:
+        return
+    total = _format_eur(float(reservation.get("montant", 0)))
+    if event == "new":
+        title = "Nouvelle demande de réservation"
+        intro = (
+            f"{reservation.get('name','')} souhaite séjourner chez vous. "
+            "Le paiement est en attente — nous vous notifierons dès qu'il est confirmé."
         )
-        logger.info(f"Confirmation email sent to {reservation['email']}")
-    except Exception as e:
-        logger.warning(f"Resend send failed: {e}")
+        subject = f"ZenStay — nouvelle demande · {listing.get('titre','')}"
+        status_label = "En attente de paiement"
+    else:
+        title = "Réservation confirmée et payée"
+        intro = (
+            f"Le paiement de {reservation.get('name','')} est confirmé. "
+            "Préparez l'accueil — la confidentialité est notre engagement."
+        )
+        subject = f"ZenStay — réservation payée · {listing.get('titre','')}"
+        status_label = "Payée"
+
+    rows = (
+        _kv("Voyageur", reservation.get("name", ""))
+        + _kv("Email", reservation.get("email", ""))
+        + _kv("Hébergement", listing.get("titre", ""), sep=True)
+        + _kv("Arrivée", reservation.get("date_arrivee", ""))
+        + _kv("Départ", reservation.get("date_depart", ""))
+        + _kv("Voyageurs", str(reservation.get("voyageurs", "")))
+        + _kv("Statut", status_label, sep=True)
+        + _kv("Montant", f"{total} €", strong=True)
+    )
+    footer = (
+        "<p style='margin:0 0 8px 0'>Vous pouvez préparer les détails d'accueil sans transmettre vos coordonnées — elles seront partagées au voyageur 24h avant l'arrivée.</p>"
+        "<p style='margin:0'>— L'équipe ZenStay</p>"
+    )
+    html = _email_shell(title=title, intro=intro, rows_html=rows, footer=footer)
+    await _resend_send(host_email, subject, html)
+
+
+
 
 
 
@@ -209,6 +307,7 @@ class Reservation(BaseModel):
     statut: str = "pending"  # pending|paid|cancelled
     stripe_link: Optional[str] = None
     stripe_session_id: Optional[str] = None
+    invoice_number: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -498,6 +597,9 @@ async def create_reservation(payload: ReservationCreate, user=Depends(require_us
         except Exception as e:
             logger.warning(f"Make webhook failed: {e}")
 
+    # Host notification email — event=new (payment pending)
+    await send_host_notification(doc, listing, event="new")
+
     out = {k: v for k, v in doc.items() if k != "_id"}
     return out
 
@@ -517,6 +619,30 @@ async def admin_reservations(admin=Depends(require_admin)):
 
 
 # ---------- Payments ----------
+async def _mark_reservation_paid_and_notify(reservation_id: str) -> None:
+    """Idempotent finalize: set paid, assign invoice_number, send client invoice + host email.
+    Safe to call multiple times — only fires emails the first time.
+    """
+    res = await db.reservations.find_one({"id": reservation_id}, {"_id": 0})
+    if not res:
+        return
+    if res.get("statut") == "paid" and res.get("invoice_number"):
+        return  # already finalized & notified
+    invoice_no = res.get("invoice_number") or _generate_invoice_number()
+    await db.reservations.update_one(
+        {"id": reservation_id, "$or": [{"invoice_number": None}, {"invoice_number": {"$exists": False}}]},
+        {"$set": {"statut": "paid", "invoice_number": invoice_no}},
+    )
+    # Re-fetch (may have been finalized by a concurrent caller)
+    res = await db.reservations.find_one({"id": reservation_id}, {"_id": 0})
+    if not res or not res.get("invoice_number"):
+        return
+    listing = await db.listings.find_one({"id": res["logement_id"]}, {"_id": 0})
+    if not listing:
+        return
+    await send_booking_confirmation(res, listing)
+    await send_host_notification(res, listing, event="paid")
+
 def _get_stripe(host_url: str) -> StripeCheckout:
     webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
     return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
@@ -630,20 +756,7 @@ async def payment_status(session_id: str, request: Request):
             },
         )
         if payment_status_val == "paid":
-            await db.reservations.update_one(
-                {"id": pt["reservation_id"]},
-                {"$set": {"statut": "paid"}},
-            )
-            # Send confirmation email (best effort)
-            updated_res = await db.reservations.find_one(
-                {"id": pt["reservation_id"]}, {"_id": 0}
-            )
-            if updated_res:
-                listing = await db.listings.find_one(
-                    {"id": updated_res["logement_id"]}, {"_id": 0}
-                )
-                if listing:
-                    await send_booking_confirmation(updated_res, listing)
+            await _mark_reservation_paid_and_notify(pt["reservation_id"])
 
     reservation = await db.reservations.find_one(
         {"id": pt["reservation_id"]}, {"_id": 0}
@@ -680,18 +793,7 @@ async def stripe_webhook(request: Request):
                 {"session_id": evt.session_id}, {"_id": 0}
             )
             if pt:
-                await db.reservations.update_one(
-                    {"id": pt["reservation_id"]}, {"$set": {"statut": "paid"}}
-                )
-                updated_res = await db.reservations.find_one(
-                    {"id": pt["reservation_id"]}, {"_id": 0}
-                )
-                if updated_res:
-                    listing = await db.listings.find_one(
-                        {"id": updated_res["logement_id"]}, {"_id": 0}
-                    )
-                    if listing:
-                        await send_booking_confirmation(updated_res, listing)
+                await _mark_reservation_paid_and_notify(pt["reservation_id"])
     return {"ok": True}
 
 
