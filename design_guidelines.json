@@ -1,0 +1,136 @@
+{
+  "theme_and_archetype": {
+    "domain": "Health, Wellness, Travel Booking",
+    "theme": "Light & Dark (Toggleable)",
+    "archetype": "Archetype 1 (Organic & Earthy)",
+    "mood": "Serene, decompressed, premium, spacious, quiet.",
+    "rationale": "ZenStay is a premium retreat for peaceful, low-noise stays. The aesthetic must feel grounding, calming, and highly trustworthy, resembling organic textures (nature, stone, sand, sage) instead of typical aggressive e-commerce UI."
+  },
+  "color_palette": {
+    "light": {
+      "background": "#FAF9F6",
+      "foreground": "#1A1C1A",
+      "primary": "#4A7C59",
+      "primary_foreground": "#FFFFFF",
+      "secondary": "#E8C39E",
+      "secondary_foreground": "#1A1C1A",
+      "muted": "#F0EFEA",
+      "muted_foreground": "#6B726B",
+      "accent": "#A8D5BA",
+      "accent_foreground": "#1A1C1A",
+      "border": "#E2E0D8",
+      "card": "#FFFFFF",
+      "card_foreground": "#1A1C1A"
+    },
+    "dark": {
+      "background": "#141614",
+      "foreground": "#EAEBEA",
+      "primary": "#A8D5BA",
+      "primary_foreground": "#141614",
+      "secondary": "#3B423C",
+      "secondary_foreground": "#EAEBEA",
+      "muted": "#1E221F",
+      "muted_foreground": "#939B94",
+      "accent": "#4A7C59",
+      "accent_foreground": "#FFFFFF",
+      "border": "#2D332E",
+      "card": "#1A1C1A",
+      "card_foreground": "#EAEBEA"
+    },
+    "custom_elements": {
+      "badge_noise_level": {
+        "light_bg": "#E9F5ED",
+        "light_text": "#2C523B",
+        "dark_bg": "#1C3325",
+        "dark_text": "#A8D5BA"
+      }
+    }
+  },
+  "typography": {
+    "strategy": "The Old Money Tech (Classic Serif Head + Sterile Body)",
+    "heading_font": "Cormorant Garamond",
+    "body_font": "Manrope",
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-none font-medium",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight leading-snug font-medium",
+      "h3": "text-xl sm:text-2xl font-medium",
+      "body": "text-base leading-relaxed text-muted-foreground",
+      "overline": "text-xs uppercase tracking-[0.2em] font-bold text-primary"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing Philosophy (Generous use of negative space to invoke calm)",
+    "containers": "Use p-6, p-8, p-12 for inner paddings. Avoid cramped blocks.",
+    "grids": "MODE A: THE 'TETRIS' GRID (For Marketing / Portfolios / Visuals). Asymmetrical listing presentations, varying card heights, 'bento' grid elements in the 'Why ZenStay' section.",
+    "hero_section": "Generous padding, high-end editorial overlay. Limit overlay to bg-black/40 if over images. Use the provided abstract background image.",
+    "corners": "Subtle roundness (rounded-2xl for main cards, rounded-full for badges/buttons) to mimic organic shapes."
+  },
+  "surface_strategies": {
+    "header": "Crystal Glassmorphism (backdrop-blur-xl bg-background/70 with 1px border-border/40) allowing page to scroll underneath.",
+    "cards": "Neumorphism & Flat mix. Solid backgrounds, very subtle shadow-sm, 1px border. On hover: -translate-y-1, shadow-lg, border-primary/20.",
+    "noise_badge": "Must be highly visible on listing cards. Use a pulsing dot (animate-pulse bg-green-500) next to '< 35 dB'."
+  },
+  "motion_and_interactions": {
+    "buttons": "transition-transform duration-200 active:scale-95. Hover states must explicitly change text color and darken/lighten background.",
+    "scroll": "Smooth, lazy-load images (fade-in).",
+    "stagger": "Listings grid should stagger in on load."
+  },
+  "media_urls": {
+    "logo": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/cbdace80-319e-4c8e-9618-57c3eff20477/images/7e4c07c32d832c4f8ab576e7b47deaf61853d6f1d3e5cc8ae49a04ffd8c8b06d.png",
+      "alt": "ZenStay Premium Logo",
+      "placement": "Header and Footer"
+    },
+    "hero_background": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/cbdace80-319e-4c8e-9618-57c3eff20477/images/91fffc191b72dafcd7c9567731c42c0b70859aa9efc85c6b5955c47601b7849f.png",
+      "alt": "Abstract organic zen background",
+      "placement": "Hero section background"
+    },
+    "listings": [
+      {
+        "url": "https://images.unsplash.com/photo-1775806577799-43d0d7efa67e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwyfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Cozy wooden cabin in a snowy forest"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1767211664493-90841f9d778b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "alt": "White building on small island"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1699210025833-07318c121bf0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwzfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Forest house"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1775974861298-8fe164a40024?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHw0fHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "alt": "Elegant house with water view"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1699209148943-acacf2821f33?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwxfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "alt": "Small cabin in forest"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1571635685743-db0db8e31d9a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "alt": "Outdoor pool at a serene ocean house"
+      }
+    ]
+  },
+  "component_rules": {
+    "icons": "lucide-react",
+    "forms": "Shadcn components heavily customized (Input, Select, Form). Increase padding on inputs for a premium feel (h-12 or h-14).",
+    "date_picker": "Shadcn Calendar with Popover. Do not use native input type=date.",
+    "badges": "Custom '< 35 dB' badge must be prominently displayed on every listing card. It represents the USP (Unique Selling Proposition) of ZenStay.",
+    "testing": "All interactive elements MUST include `data-testid` in kebab-case format (e.g., `data-testid=\"booking-submit-button\"`)."
+  },
+  "instructions_to_main_agent": [
+    "1. Setup Tailwind using the colors from 'color_palette'. Setup a theme toggle to switch between light and dark modes easily.",
+    "2. Add font imports for 'Cormorant Garamond' and 'Manrope'. Ensure Cormorant is used for headings.",
+    "3. Build the hero section with a search bar (location, dates, travelers) over the 'hero_background'.",
+    "4. The 6 listings MUST use the provided URLs from 'media_urls.listings'. Include the '< 35 dB' noise badge on each card.",
+    "5. Follow 'The Old Money Tech' typography strategy: Serifs for headings, strict sans-serif for UI/body text.",
+    "6. Build the 'Why ZenStay' section using the bento grid strategy (asymmetrical cards).",
+    "7. Include dark mode logic to invert the UI seamlessly.",
+    "8. Include bilingual text (FR/EN) capabilities (a simple context or state mapping is fine).",
+    "9. Build Google Auth and Stripe checkout flows correctly as per MVP.",
+    "10. All action components (buttons, links, forms) MUST have `data-testid` attributes.",
+    "11. Strictly use .js or .jsx for frontend files, no .tsx."
+  ]
+}
