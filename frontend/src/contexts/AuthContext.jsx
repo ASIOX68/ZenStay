@@ -2,7 +2,6 @@ import React, { createContext, useCallback, useContext, useEffect, useState } fr
 import axios from "axios";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-axios.defaults.withCredentials = true;
 
 const AuthContext = createContext(null);
 

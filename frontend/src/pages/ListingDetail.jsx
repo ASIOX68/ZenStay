@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import axios from "axios";
 import { Star, MapPin, BedDouble, Volume2, CheckCircle2 } from "lucide-react";
@@ -8,15 +8,20 @@ import Footer from "../components/Footer";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import DateRangePicker from "../components/DateRangePicker";
 import { useAuth } from "../contexts/AuthContext";
 import { useLang } from "../contexts/LanguageContext";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+function toISO(d) {
+  if (!d) return "";
+  const tz = d.getTimezoneOffset() * 60000;
+  return new Date(d - tz).toISOString().slice(0, 10);
+}
 function diffDays(a, b) {
   if (!a || !b) return 0;
-  const d1 = new Date(a); const d2 = new Date(b);
-  return Math.max(0, Math.round((d2 - d1) / 86400000));
+  return Math.max(0, Math.round((b - a) / 86400000));
 }
 
 export default function ListingDetail() {
@@ -24,8 +29,7 @@ export default function ListingDetail() {
   const { user, login } = useAuth();
   const { lang, t } = useLang();
   const [l, setL] = useState(null);
-  const [arrivee, setArrivee] = useState("");
-  const [depart, setDepart] = useState("");
+  const [range, setRange] = useState();
   const [voyageurs, setVoyageurs] = useState(2);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -44,7 +48,7 @@ export default function ListingDetail() {
     }
   }, [user]);
 
-  const nights = useMemo(() => diffDays(arrivee, depart) || 1, [arrivee, depart]);
+  const nights = useMemo(() => diffDays(range?.from, range?.to) || 1, [range]);
   const total = useMemo(() => (l ? (l.prix_nuit * nights).toFixed(2) : "0.00"), [l, nights]);
 
   if (!l) {
@@ -63,7 +67,7 @@ export default function ListingDetail() {
   const submit = async (e) => {
     e?.preventDefault();
     if (!user) { login(); return; }
-    if (!arrivee || !depart) { toast.error("Sélectionnez les dates"); return; }
+    if (!range?.from || !range?.to) { toast.error(t.booking.pick_dates); return; }
     setSubmitting(true);
     try {
       const r = await axios.post(
@@ -71,8 +75,8 @@ export default function ListingDetail() {
         {
           logement_id: l.id,
           name, email,
-          date_arrivee: arrivee,
-          date_depart: depart,
+          date_arrivee: toISO(range.from),
+          date_depart: toISO(range.to),
           voyageurs: Number(voyageurs),
         },
         { withCredentials: true }
@@ -136,21 +140,15 @@ export default function ListingDetail() {
             </p>
           </div>
 
-          {/* Booking sidebar */}
           <aside className="lg:sticky lg:top-24 self-start rounded-2xl border border-border bg-card p-7" data-testid="booking-card">
             {created ? (
               <ConfirmedBlock created={created} total={total} pay={pay} paying={paying} t={t} />
             ) : (
               <form onSubmit={submit} className="space-y-4">
                 <h2 className="font-serif text-2xl mb-2">{t.booking.title}</h2>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label={t.booking.arrival}>
-                    <Input type="date" value={arrivee} onChange={(e) => setArrivee(e.target.value)} required data-testid="booking-arrival" />
-                  </Field>
-                  <Field label={t.booking.departure}>
-                    <Input type="date" value={depart} onChange={(e) => setDepart(e.target.value)} required data-testid="booking-departure" />
-                  </Field>
-                </div>
+                <Field label={t.booking.dates}>
+                  <DateRangePicker range={range} onChange={setRange} testid="booking-date-range" />
+                </Field>
                 <Field label={t.booking.travelers}>
                   <Input type="number" min="1" max="20" value={voyageurs} onChange={(e) => setVoyageurs(e.target.value)} data-testid="booking-travelers" />
                 </Field>

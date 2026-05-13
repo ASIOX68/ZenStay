@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 3 testing of ZenStay new features (host contact, file upload + serving, email confirmation hook, filters, DateRangePicker, ImageUpload). Backend: 27/27 pytest tests pass (16 iter1+2 regression + 11 new iter3). Frontend: filters, host form, DateRangePicker on listing detail all verified e2e against the public preview URL. No CORS errors. Admin/ImageUpload visual flow could not be browser-tested (httpOnly+secure session cookie cannot be injected from headless browser without going through Google Auth), but the underlying /api/admin/upload endpoint is fully covered by pytest including auth/forbidden/oversize/non-image rejections and round-trip serve via /api/files/{path}.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_zenstay.py",
+    "/app/backend/tests/test_zenstay_iter3.py",
+    "/app/test_reports/pytest/zs_results.xml",
+    "/app/test_reports/pytest/zs3_results.xml"
+  ],
+  "action_items": [
+    "Optional: Convert `return rid` to `assert` in test_reservation_create_and_list (PytestReturnNotNoneWarning — cosmetic).",
+    "Optional: Migrate FastAPI @app.on_event handlers to lifespan (deprecation warning)."
+  ],
+  "critical_code_review_comments": [
+    "POST /api/host-contact correctly persists then fires the Make webhook best-effort inside try/except — webhook failure does not break the response. Good.",
+    "send_booking_confirmation is awaited inside both /api/payments/status (poll path) and /api/webhook/stripe — invoked exactly when payment_status_val == 'paid' AND prior status != 'paid', so idempotent. Resend errors are swallowed and logged. Good.",
+    "/api/admin/upload enforces content_type allowlist BEFORE reading body, but file size is checked AFTER reading the full body — a malicious admin could still cause memory spike with very large uploads beyond 8MB. Acceptable for an admin-only endpoint, but consider switching to UploadFile.file streaming + size budget if you ever loosen auth.",
+    "/api/files/{path:path} relies on db.files.find_one to gate access (good — prevents arbitrary storage path enumeration). Public, no auth required — intended for serving listing images. Cache-Control: public, max-age=3600 is reasonable.",
+    "Object storage init_storage uses a module-level mutable cache (_storage_key). Not concurrency-safe under uvicorn workers >1; today single-worker so OK. Worth a lock if scaled.",
+    "DateRangePicker onSelect closes popover only when both from+to selected — good UX. Disabled past dates. shadcn Calendar used (no native browser date picker). Good.",
+    "Frontend AuthContext now uses per-call withCredentials (verified via no CORS preflight failures during browser session). Listings request 200 OK from preview URL."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_zenstay_iter3.py (new — 11 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (27/27 — 16 regression + 11 new iter3)",
+    "frontend": "100% on tested flows (listings filters, host form, DateRangePicker). Admin/ImageUpload visual flow not browser-tested due to session-cookie limitation; backend endpoint fully tested."
+  },
+  "test_credentials": "admin@zenstay.com / alice@zenstay.com via seeded user_sessions tokens test_admin_session_zs (iter1+2) and test_admin_session_zs3 / test_user_session_zs3 (iter3). Both fixtures auto-seed and auto-cleanup.",
+  "seed_data_creation": "iter3 test creates one TEST_ host_contact record (cleaned up at module teardown by email TEST_ prefix) and one image file in db.files + object storage (not cleaned — small ~84B PNG, negligible).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two pytest files now cover the backend: test_zenstay.py (16) and test_zenstay_iter3.py (11). Run both with `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/results.xml`. The iter3 file uses distinct session tokens (test_admin_session_zs3 / test_user_session_zs3) so it can run in parallel with iter1+2 without collision. Object storage uses EMERGENT_LLM_KEY — verified the init→put→get round-trip works against integrations.emergentagent.com. Resend email is wired but only fires when Stripe payment becomes 'paid' (cannot reach in test mode); the helper itself was unit-tested and does not raise. For frontend admin testing in future iterations, you'll need to either (a) implement a backend test-only login route to set the session_token cookie, or (b) perform real Google OAuth flow — currently the httpOnly+secure cookie prevents headless injection.",
+  "rca of the issue": "No bugs found this iteration."
+}

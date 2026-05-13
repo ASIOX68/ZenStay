@@ -1,12 +1,15 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Cookie, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Cookie, Header, UploadFile, File
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import asyncio
 import logging
 import uuid
 import httpx
+import requests
+import resend
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
@@ -34,9 +37,121 @@ api_router = APIRouter(prefix="/api")
 STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", "")
 ADMIN_EMAIL = "admin@zenstay.com"
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
+APP_NAME = os.environ.get("APP_NAME", "zenstay")
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("zenstay")
+
+# ---------- Object storage ----------
+_storage_key: Optional[str] = None
+
+def init_storage() -> Optional[str]:
+    global _storage_key
+    if _storage_key:
+        return _storage_key
+    if not EMERGENT_LLM_KEY:
+        return None
+    try:
+        r = requests.post(
+            f"{STORAGE_URL}/init",
+            json={"emergent_key": EMERGENT_LLM_KEY},
+            timeout=30,
+        )
+        r.raise_for_status()
+        _storage_key = r.json()["storage_key"]
+        return _storage_key
+    except Exception as e:
+        logger.warning(f"Storage init failed: {e}")
+        return None
+
+
+def put_object(path: str, data: bytes, content_type: str) -> Dict[str, Any]:
+    key = init_storage()
+    if not key:
+        raise HTTPException(status_code=500, detail="Storage unavailable")
+    r = requests.put(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key, "Content-Type": content_type},
+        data=data,
+        timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def get_object(path: str) -> tuple:
+    key = init_storage()
+    if not key:
+        raise HTTPException(status_code=500, detail="Storage unavailable")
+    r = requests.get(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
+
+
+# ---------- Email ----------
+def _format_eur(v: float) -> str:
+    return f"{v:,.2f}".replace(",", " ").replace(".", ",")
+
+
+async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[str, Any]) -> None:
+    if not RESEND_API_KEY:
+        logger.info("RESEND_API_KEY missing — skipping confirmation email")
+        return
+    subject = f"ZenStay — séjour confirmé · {listing.get('titre', '')}"
+    total = _format_eur(float(reservation.get("montant", 0)))
+    html = f"""
+    <table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#FAF9F6;font-family:Helvetica,Arial,sans-serif;color:#1A1C1A">
+      <tr><td align="center" style="padding:40px 20px">
+        <table width="560" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border:1px solid #E2E0D8;border-radius:14px">
+          <tr><td style="padding:32px 32px 16px 32px">
+            <p style="font-size:11px;letter-spacing:0.25em;text-transform:uppercase;color:#4A7C59;margin:0 0 10px 0">ZenStay</p>
+            <h1 style="font-family:Georgia,serif;font-weight:500;font-size:30px;line-height:1.15;margin:0 0 8px 0">Séjour confirmé</h1>
+            <p style="font-size:15px;color:#6B726B;margin:0 0 24px 0">Merci {reservation.get('name','')}. Votre paiement a été reçu — le silence vous attend.</p>
+          </td></tr>
+          <tr><td style="padding:0 32px 24px 32px">
+            <table width="100%" cellpadding="10" cellspacing="0" border="0" style="background:#F0EFEA;border-radius:10px;font-size:14px">
+              <tr><td style="color:#6B726B">Séjour</td><td align="right">{listing.get('titre','')}</td></tr>
+              <tr><td style="color:#6B726B">Lieu</td><td align="right">{listing.get('ville','')}, {listing.get('pays','')}</td></tr>
+              <tr><td style="color:#6B726B">Arrivée</td><td align="right">{reservation.get('date_arrivee','')}</td></tr>
+              <tr><td style="color:#6B726B">Départ</td><td align="right">{reservation.get('date_depart','')}</td></tr>
+              <tr><td style="color:#6B726B">Voyageurs</td><td align="right">{reservation.get('voyageurs','')}</td></tr>
+              <tr><td style="color:#6B726B;border-top:1px solid #E2E0D8;padding-top:10px">Total payé</td>
+                  <td align="right" style="border-top:1px solid #E2E0D8;padding-top:10px;font-weight:600">{total} €</td></tr>
+            </table>
+          </td></tr>
+          <tr><td style="padding:0 32px 32px 32px;font-size:13px;color:#6B726B">
+            <p style="margin:0 0 8px 0">Les coordonnées exactes de votre hôte vous seront transmises 24h avant l'arrivée.</p>
+            <p style="margin:0">Bon repos.<br/>— L'équipe ZenStay</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+    """
+    try:
+        await asyncio.to_thread(
+            resend.Emails.send,
+            {
+                "from": SENDER_EMAIL,
+                "to": [reservation["email"]],
+                "subject": subject,
+                "html": html,
+            },
+        )
+        logger.info(f"Confirmation email sent to {reservation['email']}")
+    except Exception as e:
+        logger.warning(f"Resend send failed: {e}")
+
 
 
 # ---------- Models ----------
@@ -519,6 +634,16 @@ async def payment_status(session_id: str, request: Request):
                 {"id": pt["reservation_id"]},
                 {"$set": {"statut": "paid"}},
             )
+            # Send confirmation email (best effort)
+            updated_res = await db.reservations.find_one(
+                {"id": pt["reservation_id"]}, {"_id": 0}
+            )
+            if updated_res:
+                listing = await db.listings.find_one(
+                    {"id": updated_res["logement_id"]}, {"_id": 0}
+                )
+                if listing:
+                    await send_booking_confirmation(updated_res, listing)
 
     reservation = await db.reservations.find_one(
         {"id": pt["reservation_id"]}, {"_id": 0}
@@ -558,7 +683,138 @@ async def stripe_webhook(request: Request):
                 await db.reservations.update_one(
                     {"id": pt["reservation_id"]}, {"$set": {"statut": "paid"}}
                 )
+                updated_res = await db.reservations.find_one(
+                    {"id": pt["reservation_id"]}, {"_id": 0}
+                )
+                if updated_res:
+                    listing = await db.listings.find_one(
+                        {"id": updated_res["logement_id"]}, {"_id": 0}
+                    )
+                    if listing:
+                        await send_booking_confirmation(updated_res, listing)
     return {"ok": True}
+
+
+# ---------- Host contact ----------
+class HostContact(BaseModel):
+    name: str
+    email: EmailStr
+    location: str
+    db_estimate: Optional[int] = None
+    description: str
+    phone: Optional[str] = None
+
+
+@api_router.post("/host-contact")
+async def create_host_contact(payload: HostContact):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": payload.name,
+        "email": payload.email,
+        "location": payload.location,
+        "db_estimate": payload.db_estimate,
+        "description": payload.description,
+        "phone": payload.phone,
+        "status": "new",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.host_contacts.insert_one(doc)
+
+    if MAKE_WEBHOOK_URL:
+        try:
+            async with httpx.AsyncClient() as hc:
+                await hc.post(
+                    MAKE_WEBHOOK_URL,
+                    json={
+                        "type": "host_contact",
+                        "name": payload.name,
+                        "email": payload.email,
+                        "location": payload.location,
+                        "db_estimate": payload.db_estimate,
+                        "description": payload.description,
+                        "phone": payload.phone,
+                        "admin_email": ADMIN_EMAIL,
+                    },
+                    timeout=10.0,
+                )
+        except Exception as e:
+            logger.warning(f"Host contact webhook failed: {e}")
+
+    return {"ok": True, "id": doc["id"]}
+
+
+@api_router.get("/admin/host-contacts")
+async def admin_list_host_contacts(admin=Depends(require_admin)):
+    docs = await db.host_contacts.find({}, {"_id": 0}).to_list(500)
+    return docs
+
+
+# ---------- File upload ----------
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
+MAX_UPLOAD_SIZE = 8 * 1024 * 1024  # 8 MB
+
+
+@api_router.post("/admin/upload")
+async def admin_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    admin=Depends(require_admin),
+):
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (max 8 MB)")
+
+    ext = (file.filename or "img").split(".")[-1].lower()
+    if ext not in {"jpg", "jpeg", "png", "webp", "gif"}:
+        ext = "jpg"
+    path = f"{APP_NAME}/uploads/{admin['user_id']}/{uuid.uuid4().hex}.{ext}"
+
+    try:
+        result = await asyncio.to_thread(put_object, path, data, file.content_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        raise HTTPException(status_code=500, detail="Upload failed")
+
+    file_id = str(uuid.uuid4())
+    await db.files.insert_one(
+        {
+            "id": file_id,
+            "storage_path": result["path"],
+            "original_filename": file.filename,
+            "content_type": file.content_type,
+            "size": result.get("size", len(data)),
+            "uploaded_by": admin["user_id"],
+            "is_deleted": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    base = str(request.base_url).rstrip("/")
+    public_url = f"{base}/api/files/{result['path']}"
+    return {"id": file_id, "url": public_url, "path": result["path"]}
+
+
+@api_router.get("/files/{path:path}")
+async def serve_file(path: str):
+    record = await db.files.find_one(
+        {"storage_path": path, "is_deleted": False}, {"_id": 0}
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        data, content_type = await asyncio.to_thread(get_object, path)
+    except Exception as e:
+        logger.warning(f"Storage get failed: {e}")
+        raise HTTPException(status_code=404, detail="File not found")
+    return Response(
+        content=data,
+        media_type=record.get("content_type") or content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 # ---------- Health ----------
@@ -690,6 +946,11 @@ async def seed_data():
 @app.on_event("startup")
 async def on_startup():
     await seed_data()
+    try:
+        await asyncio.to_thread(init_storage)
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logger.warning(f"Storage init failed at startup: {e}")
 
 
 # ---------- Mount & CORS ----------
@@ -698,7 +959,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origin_regex=r"https?://.*",
     allow_methods=["*"],
     allow_headers=["*"],
 )

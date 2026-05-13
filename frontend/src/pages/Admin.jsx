@@ -10,6 +10,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
+import ImageUpload from "../components/ImageUpload";
 import { useAuth } from "../contexts/AuthContext";
 import { useLang } from "../contexts/LanguageContext";
 
@@ -172,7 +173,9 @@ export default function Admin() {
               <Field label="Note"><Input type="number" step="0.1" value={editing.note} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field>
               <Field label="Hôte email"><Input value={editing.hote_email} onChange={(e) => setEditing({ ...editing, hote_email: e.target.value })} /></Field>
               <div className="sm:col-span-2">
-                <Field label="Image URL"><Input value={editing.image_url} onChange={(e) => setEditing({ ...editing, image_url: e.target.value })} /></Field>
+                <Field label="Image">
+                  <ImageUpload value={editing.image_url} onChange={(url) => setEditing({ ...editing, image_url: url })} />
+                </Field>
               </div>
               <div className="sm:col-span-2">
                 <Field label="Description (FR)"><Textarea value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} /></Field>
