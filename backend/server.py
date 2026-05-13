@@ -17,6 +17,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutStatusResponse,
     CheckoutSessionRequest,
 )
+import stripe as stripe_sdk
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -468,8 +469,39 @@ async def payment_status(session_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Unknown session")
 
     host_url = str(request.base_url)
-    stripe_checkout = _get_stripe(host_url)
-    status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+    payment_status_val = None
+    session_status_val = None
+    amount_total_cents = None
+    currency = "eur"
+    try:
+        stripe_checkout = _get_stripe(host_url)
+        status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        payment_status_val = status.payment_status
+        session_status_val = status.status
+        amount_total_cents = status.amount_total
+        currency = status.currency
+    except Exception as e:
+        # Fallback: hit Stripe SDK directly (lib has a metadata-type bug)
+        logger.warning(f"emergentintegrations get_checkout_status failed, falling back to stripe SDK: {e}")
+        stripe_sdk.api_key = STRIPE_API_KEY
+        s = stripe_sdk.checkout.Session.retrieve(session_id)
+        # StripeObject supports dict-style [] access; .get() collides with __getattr__
+        try:
+            payment_status_val = s["payment_status"] or "unpaid"
+        except KeyError:
+            payment_status_val = "unpaid"
+        try:
+            session_status_val = s["status"] or "open"
+        except KeyError:
+            session_status_val = "open"
+        try:
+            amount_total_cents = s["amount_total"]
+        except KeyError:
+            amount_total_cents = None
+        try:
+            currency = s["currency"] or "eur"
+        except KeyError:
+            currency = "eur"
 
     # Update transaction only if not already paid
     if pt.get("payment_status") != "paid":
@@ -477,12 +509,12 @@ async def payment_status(session_id: str, request: Request):
             {"session_id": session_id},
             {
                 "$set": {
-                    "payment_status": status.payment_status,
-                    "status": status.status,
+                    "payment_status": payment_status_val,
+                    "status": session_status_val,
                 }
             },
         )
-        if status.payment_status == "paid":
+        if payment_status_val == "paid":
             await db.reservations.update_one(
                 {"id": pt["reservation_id"]},
                 {"$set": {"statut": "paid"}},
@@ -493,10 +525,10 @@ async def payment_status(session_id: str, request: Request):
     )
     return {
         "session_id": session_id,
-        "payment_status": status.payment_status,
-        "status": status.status,
-        "amount": status.amount_total / 100.0 if status.amount_total else pt["amount"],
-        "currency": status.currency,
+        "payment_status": payment_status_val,
+        "status": session_status_val,
+        "amount": (amount_total_cents / 100.0) if amount_total_cents else pt["amount"],
+        "currency": currency,
         "reservation": reservation,
     }
 

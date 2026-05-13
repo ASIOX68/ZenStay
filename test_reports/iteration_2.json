@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 2 re-verification of ZenStay backend after main agent's patch for GET /api/payments/status/{session_id}. Found the patched fallback contained a bug (used s.get() on StripeObject which raises AttributeError because StripeObject overrides __getattr__). Applied a minimal fix to use dict-style bracket access on the StripeObject. After fix, full pytest suite passes 16/16 (100%). The previously failing test_payment_checkout_and_status now passes: real Stripe session is created, status endpoint returns 200 with payment_status (='unpaid' for unpaid test sessions) and status fields.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_zenstay.py",
+    "/app/test_reports/pytest/zs_results.xml"
+  ],
+  "action_items": [
+    "Optional cleanup: convert `return rid` in test_reservation_create_and_list to `assert` (PytestReturnNotNoneWarning).",
+    "Optional: consider splitting /app/backend/server.py (still ~700 lines) into routers/auth/payments modules."
+  ],
+  "critical_code_review_comments": [
+    "The Stripe SDK fallback in server.py initially used s.get('payment_status') which fails because stripe._stripe_object.StripeObject overrides __getattr__ and treats 'get' as a stripe key — fixed by switching to dict-style bracket access s['payment_status'] with KeyError guards.",
+    "The fallback path silently catches *all* Exceptions from emergentintegrations; consider catching only CheckoutError / pydantic.ValidationError to avoid masking unrelated bugs (e.g., network errors should still 502).",
+    "Consider also persisting amount_total / currency from the SDK fallback path (already done) — good.",
+    "Webhook-driven flow remains the authoritative source for reservation.statut='paid'; polling endpoint correctly mirrors it. OK."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (lines 486-505: bracket access in stripe SDK fallback)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16)",
+    "frontend": "not tested this iteration (skip frontend per request)"
+  },
+  "test_credentials": "admin@zenstay.com / alice@zenstay.com via seeded user_sessions tokens test_admin_session_zs and test_user_session_zs (auto-seeded & cleaned by pytest fixture).",
+  "seed_data_creation": "Sessions are seeded by pytest fixture at module setup and removed at teardown. App-level seed listings/users created at backend startup.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 16 backend pytest cases pass against the public preview URL. The /api/payments/status/{session_id} endpoint is fixed (uses stripe SDK direct retrieve with dict-style access when emergentintegrations library's pydantic validation fails). To re-run: `pytest /app/backend/tests/test_zenstay.py -v`. Note that pytest cleans up its session tokens at teardown, so manual curl after pytest needs re-seeding via the mongosh snippet in /app/memory/test_credentials.md.",
+  "rca of the issue": "RCA of iteration_2 residual bug: main agent's fallback code in server.py:488 used `s.get('payment_status')`. Stripe's stripe._stripe_object.StripeObject (Python SDK v12+) overrides __getattr__ to fetch keys, which intercepts the `.get` attribute lookup before Python finds the inherited dict.get method, raising AttributeError('get'). Fix: use s['payment_status'] / s['status'] / s['amount_total'] / s['currency'] (bracket access on StripeObject works as expected) wrapped in try/except KeyError. After fix, endpoint returns 200 with payment_status='unpaid' (Stripe test session not yet paid) and status='open' — acceptable per request spec."
+}
