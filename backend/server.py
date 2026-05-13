@@ -165,7 +165,7 @@ def _kv(label: str, value: str, *, strong: bool = False, sep: bool = False) -> s
     )
 
 
-async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[str, Any]) -> None:
+async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[str, Any], app_origin: Optional[str] = None) -> None:
     """Client invoice email — sent after Stripe payment is paid."""
     total = _format_eur(float(reservation.get("montant", 0)))
     nights = _nights_count(reservation.get("date_arrivee", ""), reservation.get("date_depart", ""))
@@ -186,12 +186,21 @@ async def send_booking_confirmation(reservation: Dict[str, Any], listing: Dict[s
         + _kv(f"Tarif · {nights} × {_format_eur(prix_nuit)} €", f"{_format_eur(prix_nuit * nights)} €", sep=True)
         + _kv("Total payé TTC", f"{total} €", strong=True, sep=True)
     )
+    invoice_link_html = ""
+    if app_origin:
+        url = f"{app_origin.rstrip('/')}/invoices/{invoice_no}"
+        invoice_link_html = (
+            f"<p style='margin:18px 0 8px 0'>"
+            f"<a href='{url}' style='display:inline-block;background:#4A7C59;color:#FFFFFF;text-decoration:none;padding:12px 22px;border-radius:9999px;font-size:13px;font-weight:600'>"
+            f"Voir & imprimer la facture →</a></p>"
+        )
     footer = (
-        "<p style='margin:0 0 8px 0'>Les coordonnées exactes de votre hôte vous seront transmises 24h avant l'arrivée.</p>"
-        "<p style='margin:0 0 8px 0;color:#A1A6A1;font-size:11px'>"
-        "Conservez ce document — il vaut facture. Aucune TVA appliquée (régime exonéré loueur particulier)."
-        "</p>"
-        "<p style='margin:0'>Bon repos.<br/>— L'équipe ZenStay</p>"
+        invoice_link_html
+        + "<p style='margin:0 0 8px 0'>Les coordonnées exactes de votre hôte vous seront transmises 24h avant l'arrivée.</p>"
+        + "<p style='margin:0 0 8px 0;color:#A1A6A1;font-size:11px'>"
+          "Conservez ce document — il vaut facture. Aucune TVA appliquée (régime exonéré loueur particulier)."
+          "</p>"
+        + "<p style='margin:0'>Bon repos.<br/>— L'équipe ZenStay</p>"
     )
     html = _email_shell(
         title="Paiement reçu — séjour confirmé",
@@ -619,7 +628,7 @@ async def admin_reservations(admin=Depends(require_admin)):
 
 
 # ---------- Payments ----------
-async def _mark_reservation_paid_and_notify(reservation_id: str) -> None:
+async def _mark_reservation_paid_and_notify(reservation_id: str, app_origin: Optional[str] = None) -> None:
     """Idempotent finalize: set paid, assign invoice_number, send client invoice + host email.
     Only the writer that wins the conditional update sends emails — strict idempotency
     under concurrent /payments/status + /webhook/stripe race.
@@ -638,7 +647,6 @@ async def _mark_reservation_paid_and_notify(reservation_id: str) -> None:
         {"$set": {"statut": "paid", "invoice_number": invoice_no}},
     )
     if upd.matched_count == 0:
-        # Another caller already finalized — don't re-send emails
         return
     res = await db.reservations.find_one({"id": reservation_id}, {"_id": 0})
     if not res:
@@ -646,7 +654,7 @@ async def _mark_reservation_paid_and_notify(reservation_id: str) -> None:
     listing = await db.listings.find_one({"id": res["logement_id"]}, {"_id": 0})
     if not listing:
         return
-    await send_booking_confirmation(res, listing)
+    await send_booking_confirmation(res, listing, app_origin=app_origin)
     await send_host_notification(res, listing, event="paid")
 
 def _get_stripe(host_url: str) -> StripeCheckout:
@@ -695,10 +703,11 @@ async def create_checkout(
         currency="eur",
         payment_status="initiated",
         status="open",
-        metadata={"reservation_id": reservation["id"]},
+        metadata={"reservation_id": reservation["id"], "app_origin": origin},
     )
     doc = pt.model_dump()
     doc["created_at"] = doc["created_at"].isoformat()
+    doc["app_origin"] = origin
     await db.payment_transactions.insert_one(doc)
 
     await db.reservations.update_one(
@@ -799,7 +808,7 @@ async def stripe_webhook(request: Request):
                 {"session_id": evt.session_id}, {"_id": 0}
             )
             if pt:
-                await _mark_reservation_paid_and_notify(pt["reservation_id"])
+                await _mark_reservation_paid_and_notify(pt["reservation_id"], app_origin=pt.get("app_origin"))
     return {"ok": True}
 
 
@@ -923,6 +932,138 @@ async def serve_file(path: str):
         media_type=record.get("content_type") or content_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+# ---------- Public Invoice ----------
+@api_router.get("/invoices/{invoice_number}")
+async def get_invoice(invoice_number: str):
+    """Public-by-link invoice (the unguessable invoice number is the secret)."""
+    res = await db.reservations.find_one(
+        {"invoice_number": invoice_number}, {"_id": 0}
+    )
+    if not res:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    listing = await db.listings.find_one({"id": res["logement_id"]}, {"_id": 0})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    # strip hote_email from public response
+    listing_public = {k: v for k, v in listing.items() if k != "hote_email"}
+    nights = _nights_count(res["date_arrivee"], res["date_depart"])
+    return {
+        "invoice_number": invoice_number,
+        "issued_at": res.get("created_at"),
+        "name": res["name"],
+        "email": res["email"],
+        "date_arrivee": res["date_arrivee"],
+        "date_depart": res["date_depart"],
+        "voyageurs": res["voyageurs"],
+        "nights": nights,
+        "prix_nuit": listing["prix_nuit"],
+        "subtotal": round(nights * float(listing["prix_nuit"]), 2),
+        "total": float(res["montant"]),
+        "currency": "EUR",
+        "statut": res["statut"],
+        "listing": listing_public,
+    }
+
+
+# ---------- Host portal ----------
+async def get_host_listings_for(user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    docs = await db.listings.find({"hote_email": user["email"]}, {"_id": 0}).to_list(200)
+    return docs
+
+
+@api_router.get("/host/me")
+async def host_me(user=Depends(require_user)):
+    listings = await get_host_listings_for(user)
+    return {
+        "is_host": len(listings) > 0,
+        "listing_count": len(listings),
+        "email": user["email"],
+        "name": user["name"],
+    }
+
+
+@api_router.get("/host/listings")
+async def host_list_listings(user=Depends(require_user)):
+    listings = await get_host_listings_for(user)
+    return listings
+
+
+@api_router.put("/host/listings/{listing_id}")
+async def host_update_listing(
+    listing_id: str, payload: ListingCreate, user=Depends(require_user)
+):
+    doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if doc.get("hote_email") != user["email"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Not your listing")
+    # Host cannot reassign hote_email to someone else
+    body = payload.model_dump()
+    body["hote_email"] = doc["hote_email"]
+    await db.listings.update_one({"id": listing_id}, {"$set": body})
+    new_doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    return new_doc
+
+
+@api_router.patch("/host/listings/{listing_id}/toggle")
+async def host_toggle_listing(listing_id: str, user=Depends(require_user)):
+    doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    if doc.get("hote_email") != user["email"] and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Not your listing")
+    new_state = not bool(doc.get("disponible", True))
+    await db.listings.update_one({"id": listing_id}, {"$set": {"disponible": new_state}})
+    return {"id": listing_id, "disponible": new_state}
+
+
+@api_router.get("/host/reservations")
+async def host_reservations(user=Depends(require_user)):
+    listings = await get_host_listings_for(user)
+    listing_ids = [l["id"] for l in listings]
+    if not listing_ids:
+        return []
+    docs = await db.reservations.find(
+        {"logement_id": {"$in": listing_ids}}, {"_id": 0}
+    ).to_list(500)
+    # enrich with listing title for convenience
+    by_id = {l["id"]: l for l in listings}
+    for d in docs:
+        l = by_id.get(d["logement_id"], {})
+        d["listing_titre"] = l.get("titre")
+        d["listing_ville"] = l.get("ville")
+    return docs
+
+
+@api_router.get("/host/stats")
+async def host_stats(user=Depends(require_user)):
+    listings = await get_host_listings_for(user)
+    listing_ids = [l["id"] for l in listings]
+    if not listing_ids:
+        return {
+            "listings": 0,
+            "reservations_total": 0,
+            "reservations_paid": 0,
+            "reservations_pending": 0,
+            "revenue_paid_eur": 0.0,
+            "revenue_pending_eur": 0.0,
+        }
+    docs = await db.reservations.find(
+        {"logement_id": {"$in": listing_ids}}, {"_id": 0}
+    ).to_list(1000)
+    paid = [d for d in docs if d.get("statut") == "paid"]
+    pending = [d for d in docs if d.get("statut") != "paid"]
+    return {
+        "listings": len(listings),
+        "reservations_total": len(docs),
+        "reservations_paid": len(paid),
+        "reservations_pending": len(pending),
+        "revenue_paid_eur": round(sum(float(d.get("montant", 0)) for d in paid), 2),
+        "revenue_pending_eur": round(sum(float(d.get("montant", 0)) for d in pending), 2),
+    }
+
 
 
 # ---------- Health ----------

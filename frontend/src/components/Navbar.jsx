@@ -1,15 +1,26 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import axios from "axios";
 import { Moon, Sun, Globe, LogOut, User as UserIcon } from "lucide-react";
 import { useTheme } from "../contexts/ThemeContext";
 import { useLang } from "../contexts/LanguageContext";
 import { useAuth } from "../contexts/AuthContext";
 import { Button } from "./ui/button";
 
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
 export default function Navbar() {
   const { theme, toggle } = useTheme();
   const { lang, setLang, t } = useLang();
   const { user, login, logout } = useAuth();
+  const [isHost, setIsHost] = useState(false);
+
+  useEffect(() => {
+    if (!user) { setIsHost(false); return; }
+    axios.get(`${API}/host/me`, { withCredentials: true })
+      .then((r) => setIsHost(!!r.data?.is_host))
+      .catch(() => setIsHost(false));
+  }, [user]);
 
   return (
     <header className="sticky top-0 z-40 backdrop-blur-xl bg-background/70 border-b border-border/60">
@@ -29,6 +40,11 @@ export default function Navbar() {
           {user?.role === "admin" && (
             <Link to="/admin" className="hover:text-foreground transition-colors" data-testid="nav-admin">
               {t.nav.admin}
+            </Link>
+          )}
+          {isHost && (
+            <Link to="/host-portal" className="hover:text-foreground transition-colors" data-testid="nav-host-portal">
+              {t.host_portal.title}
             </Link>
           )}
           {user && (

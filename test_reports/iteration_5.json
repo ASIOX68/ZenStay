@@ -1,0 +1,48 @@
+{
+  "summary": "ZenStay iteration 5 — backend 60/60 pytest passing (39 regression + 21 new iter5). Frontend has TWO critical blockers I fixed during testing: (1) dangling/duplicate code at end of /app/frontend/src/contexts/LanguageContext.jsx caused webpack compile error 'Unexpected token (249:5)', (2) /app/frontend/src/App.js used <HostPortal /> and <InvoicePage /> in <Route> but never imported them — runtime error 'HostPortal is not defined' crashing AppRouter. After both fixes, public bundle compiles and bundle.js loads, but the React root still failed to mount during my browser-automation runs (page body shows only static index.html noscript text). Backend endpoints all verified working via direct HTTP tests including: invoice public-by-link with correct payload + privacy (no hote_email), host/me / host/listings / host/reservations / host/stats with correct gating, PUT host listings preserves hote_email server-side (even on admin override + when host attempts reassignment), PATCH toggle 200/403/404, app_origin passed through to send_booking_confirmation without raising (None or set), and previous 39 tests still green.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "LanguageContext.jsx", "issue": "Trailing duplicate code (lines 248-251 of original) caused 'SyntaxError: Unexpected token (249:5)' — webpack compile error, blank app with red overlay. Fixed by removing the dangling ' {children} </LanguageContext.Provider> );}' and the duplicate useLang export.", "selector": "n/a", "priority": "HIGH"},
+      {"component": "App.js", "issue": "Routes /host-portal and /invoices/:invoice_number reference <HostPortal /> and <InvoicePage /> but the corresponding import statements were missing → runtime crash 'HostPortal is not defined' inside <AppRouter>, blank screen on every route. Fixed by adding `import HostPortal from './pages/HostPortal'` and `import InvoicePage from './pages/InvoicePage'`.", "selector": "n/a", "priority": "CRITICAL"},
+      {"component": "App shell (post-fix)", "issue": "After both fixes the bundle compiles and bundle.js loads, but in my automated browser run the React root remained empty (body kept showing static index.html noscript content). Could not capture a fresh pageerror — possibly a stale webpack-dev-server overlay state or a remaining runtime error not surfaced. Main agent must verify in a real browser. If still broken, look for other AppRouter-throwing imports / undefined components.", "selector": "#root", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_zenstay_iter5.py",
+    "/app/test_reports/pytest/zs_iter5_results.xml",
+    "/app/test_reports/pytest/zs_iter5_full.xml"
+  ],
+  "action_items": [
+    "Verify in a real browser that /, /invoices/ZS-202610-UIT001, and /host-portal now render after my two fixes. If still blank, inspect devtools Network for bundle 4xx and Console for the first thrown error — there may be another missing import / typo I did not catch.",
+    "Consider an ErrorBoundary at AppRouter root so future undefined-component errors don't render a fully blank page.",
+    "Remove leftover dangling code patterns — likely an editor merge artifact in LanguageContext.jsx; add ESLint pre-commit to catch unreachable / duplicate exports."
+  ],
+  "critical_code_review_comments": [
+    "Backend: /api/invoices/{invoice_number} correctly strips hote_email from the returned listing (privacy preserved) and uses the unguessable invoice number as the secret. Returns 404 cleanly for both unknown invoice and orphan listing.",
+    "Backend: PUT /api/host/listings/{id} correctly forces body['hote_email'] = doc['hote_email'] before persisting → host cannot reassign ownership AND admin override also cannot reassign through this endpoint (verified). Use /api/admin/listings/{id} (PUT) for legitimate reassignment.",
+    "Backend: /api/host/* gating uses listing.hote_email == user.email (case-sensitive). Acceptable since emails are normalized on insert via Google Auth, but consider lower-casing for safety.",
+    "Backend: payment_transactions stores app_origin as a top-level field AND inside metadata — slight duplication. Webhook reads pt.get('app_origin') which is correct. _mark_reservation_paid_and_notify now correctly forwards app_origin to send_booking_confirmation; verified both with None and a URL — no exception either way.",
+    "Frontend (post-fix): App.js had unimported components — the kind of bug typically caught by an ESLint 'no-undef' rule. Recommend adding 'eslint-plugin-react' + 'react/jsx-no-undef' to CI.",
+    "Frontend: LanguageContext.jsx had dead/duplicate code past the closing brace of LanguageProvider — clear merge artifact. Suggests no pre-commit linter is running on the frontend.",
+    "Frontend: HostPortal protects via is_host check client-side, but the route itself isn't gated server-side beyond the API calls — that's fine because the API itself enforces auth and identity."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_zenstay_iter5.py (new — 21 tests, all pass)",
+    "/app/frontend/src/contexts/LanguageContext.jsx (removed dangling/duplicate trailing code that broke webpack compile)",
+    "/app/frontend/src/App.js (added missing imports for HostPortal and InvoicePage)"
+  ],
+  "success_rate": {
+    "backend": "100% (60/60 — 39 regression iter1-4 + 21 new iter5)",
+    "frontend": "Unable to verify in browser. Two blocking bugs found and fixed; further verification still required by main agent."
+  },
+  "test_credentials": "Sessions seeded by iter5 fixtures: test_host_session_zs5 (marie.host@zenstay.com), test_user_session_zs5 (ben@zenstay.com), test_admin_session_zs5 (admin@zenstay.com). For UI: 'ui_test_host_session' cookie maps to marie.host@zenstay.com (persists in DB).",
+  "seed_data_creation": "iter5 fixtures: listings prefixed 'test-zs5-*', reservations with name 'TEST_ZS5*' — all auto-cleaned at module teardown. UI-test paid reservation seeded directly: invoice_number=ZS-202610-UIT001, listing=Cabane Brocéliande, statut=paid. Not auto-cleaned; main agent can delete via mongosh db.reservations.deleteOne({invoice_number:'ZS-202610-UIT001'}).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v --junitxml=/app/test_reports/pytest/results.xml` → expect 60 passing. Frontend: after my two fixes (App.js imports, LanguageContext cleanup) the bundle compiles. If pages still render blank in browser, look for any other missing import / undefined React component referenced in App.js routes — those crash the whole router with a blank screen because there is no error boundary. Public UI test invoice: /invoices/ZS-202610-UIT001 (paid, 3 nights × 168€ = 504€). Host portal UI: set cookie session_token=ui_test_host_session for marie.host@zenstay.com and visit /host-portal — should show 1 listing (Cabane Brocéliande) and the invoice's reservation in the bookings tab. Navbar 'Espace hôte' link should appear only when /api/host/me returns is_host=true.",
+  "rca of the issue": "RCA frontend blockers: (1) /app/frontend/src/contexts/LanguageContext.jsx contained 4 lines of dangling JSX code after the LanguageProvider function had already closed — likely a copy-paste/merge mistake — causing 'Unexpected token (249:5)' from Babel and the standard CRA 'Compiled with problems' overlay. (2) /app/frontend/src/App.js declared <Route> elements using <HostPortal /> and <InvoicePage /> without importing them, so when React-Router rendered the AppRouter tree on any route it threw 'HostPortal is not defined' and the whole app blanked because there's no ErrorBoundary. Reproduction: just opening any URL on the deployed preview triggered the AppRouter error visible in console. Mitigation applied: added the two missing imports and removed the dangling JSX. Long-term fix: enable ESLint (react/jsx-no-undef + no-unreachable) in pre-commit / CI."
+}

@@ -13,6 +13,8 @@ import PaymentSuccess from "./pages/PaymentSuccess";
 import Dashboard from "./pages/Dashboard";
 import Admin from "./pages/Admin";
 import HostPage from "./pages/HostPage";
+import HostPortal from "./pages/HostPortal";
+import InvoicePage from "./pages/InvoicePage";
 import AuthCallback from "./components/AuthCallback";
 
 function AppRouter() {
@@ -30,6 +32,8 @@ function AppRouter() {
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/admin" element={<Admin />} />
       <Route path="/host" element={<HostPage />} />
+      <Route path="/host-portal" element={<HostPortal />} />
+      <Route path="/invoices/:invoice_number" element={<InvoicePage />} />
     </Routes>
   );
 }

@@ -35,6 +35,11 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm text-muted-foreground">{b.date_arrivee} → {b.date_depart} · {b.voyageurs} pax</p>
                 <p className="font-serif text-2xl mt-1">{b.montant}€</p>
+                {b.invoice_number && (
+                  <Link to={`/invoices/${b.invoice_number}`} className="text-xs uppercase tracking-[0.2em] text-primary hover:underline" data-testid={`invoice-link-${b.invoice_number}`}>
+                    Facture {b.invoice_number} →
+                  </Link>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 <span className={`px-3 py-1.5 rounded-full text-xs uppercase tracking-widest ${b.statut === "paid" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}>
