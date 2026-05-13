@@ -621,21 +621,27 @@ async def admin_reservations(admin=Depends(require_admin)):
 # ---------- Payments ----------
 async def _mark_reservation_paid_and_notify(reservation_id: str) -> None:
     """Idempotent finalize: set paid, assign invoice_number, send client invoice + host email.
-    Safe to call multiple times — only fires emails the first time.
+    Only the writer that wins the conditional update sends emails — strict idempotency
+    under concurrent /payments/status + /webhook/stripe race.
     """
     res = await db.reservations.find_one({"id": reservation_id}, {"_id": 0})
     if not res:
         return
     if res.get("statut") == "paid" and res.get("invoice_number"):
         return  # already finalized & notified
-    invoice_no = res.get("invoice_number") or _generate_invoice_number()
-    await db.reservations.update_one(
-        {"id": reservation_id, "$or": [{"invoice_number": None}, {"invoice_number": {"$exists": False}}]},
+    invoice_no = _generate_invoice_number()
+    upd = await db.reservations.update_one(
+        {
+            "id": reservation_id,
+            "$or": [{"invoice_number": None}, {"invoice_number": {"$exists": False}}],
+        },
         {"$set": {"statut": "paid", "invoice_number": invoice_no}},
     )
-    # Re-fetch (may have been finalized by a concurrent caller)
+    if upd.matched_count == 0:
+        # Another caller already finalized — don't re-send emails
+        return
     res = await db.reservations.find_one({"id": reservation_id}, {"_id": 0})
-    if not res or not res.get("invoice_number"):
+    if not res:
         return
     listing = await db.listings.find_one({"id": res["logement_id"]}, {"_id": 0})
     if not listing:
