@@ -1,88 +1,676 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, Cookie, Header
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
 import uuid
-from datetime import datetime, timezone
-
+import httpx
+from pathlib import Path
+from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout,
+    CheckoutSessionResponse,
+    CheckoutStatusResponse,
+    CheckoutSessionRequest,
+)
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# ---------- DB ----------
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ["DB_NAME"]]
 
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
+# ---------- App ----------
+app = FastAPI(title="ZenStay API")
 api_router = APIRouter(prefix="/api")
 
+STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", "")
+ADMIN_EMAIL = "admin@zenstay.com"
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("zenstay")
+
+
+# ---------- Models ----------
+class User(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    role: str = "user"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Listing(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    titre: str
+    titre_en: Optional[str] = None
+    ville: str
+    pays: Optional[str] = "France"
+    prix_nuit: float
+    note: float = 4.8
+    db_nuit: int = 30
+    image_url: str
+    description: str
+    description_en: Optional[str] = None
+    hote_email: str
+    disponible: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
 
-# Add your routes to the router instead of directly to app
+class ListingCreate(BaseModel):
+    titre: str
+    titre_en: Optional[str] = None
+    ville: str
+    pays: Optional[str] = "France"
+    prix_nuit: float
+    note: float = 4.8
+    db_nuit: int = 30
+    image_url: str
+    description: str
+    description_en: Optional[str] = None
+    hote_email: str
+    disponible: bool = True
+
+
+class Reservation(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    logement_id: str
+    name: str
+    email: str
+    date_arrivee: str
+    date_depart: str
+    voyageurs: int = 1
+    montant: float
+    statut: str = "pending"  # pending|paid|cancelled
+    stripe_link: Optional[str] = None
+    stripe_session_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ReservationCreate(BaseModel):
+    logement_id: str
+    name: str
+    email: str
+    date_arrivee: str
+    date_depart: str
+    voyageurs: int = 1
+
+
+class PaymentTransaction(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str
+    reservation_id: str
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    amount: float
+    currency: str = "eur"
+    payment_status: str = "initiated"  # initiated|paid|failed|expired
+    status: str = "open"
+    metadata: Dict[str, Any] = {}
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CheckoutRequest(BaseModel):
+    reservation_id: str
+    origin_url: str
+
+
+# ---------- Auth helpers ----------
+async def get_current_user(
+    request: Request,
+    session_token: Optional[str] = Cookie(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[Dict[str, Any]]:
+    token = session_token
+    if not token and authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not sess:
+        return None
+    expires_at = sess.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at and expires_at < datetime.now(timezone.utc):
+        return None
+    user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+    return user
+
+
+async def require_user(user=Depends(get_current_user)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+
+async def require_admin(user=Depends(require_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+
+# ---------- Auth Routes ----------
+@api_router.post("/auth/session")
+async def auth_session(request: Request, response: Response):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+
+    async with httpx.AsyncClient() as hc:
+        r = await hc.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id},
+            timeout=15.0,
+        )
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid session_id")
+    data = r.json()
+    email = data["email"]
+    name = data.get("name", email.split("@")[0])
+    picture = data.get("picture")
+    session_token = data["session_token"]
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        role = existing.get("role", "user")
+        if email == ADMIN_EMAIL and role != "admin":
+            await db.users.update_one({"user_id": user_id}, {"$set": {"role": "admin"}})
+            role = "admin"
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": name, "picture": picture}},
+        )
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        role = "admin" if email == ADMIN_EMAIL else "user"
+        await db.users.insert_one(
+            {
+                "user_id": user_id,
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "role": role,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one(
+        {
+            "user_id": user_id,
+            "session_token": session_token,
+            "expires_at": expires_at,
+            "created_at": datetime.now(timezone.utc),
+        }
+    )
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        max_age=7 * 24 * 60 * 60,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+    return {
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "picture": picture,
+        "role": role,
+    }
+
+
+@api_router.get("/auth/me")
+async def auth_me(user=Depends(get_current_user)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+
+@api_router.post("/auth/logout")
+async def auth_logout(
+    response: Response,
+    session_token: Optional[str] = Cookie(default=None),
+):
+    if session_token:
+        await db.user_sessions.delete_many({"session_token": session_token})
+    response.delete_cookie("session_token", path="/", samesite="none", secure=True)
+    return {"ok": True}
+
+
+# ---------- Listings ----------
+def _pub_listing(doc: Dict[str, Any]) -> Dict[str, Any]:
+    # Remove hote_email before exposing to public/users
+    doc = {k: v for k, v in doc.items() if k != "hote_email"}
+    return doc
+
+
+@api_router.get("/listings")
+async def list_listings():
+    docs = await db.listings.find({}, {"_id": 0}).to_list(200)
+    return [_pub_listing(d) for d in docs]
+
+
+@api_router.get("/listings/{listing_id}")
+async def get_listing(listing_id: str):
+    doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return _pub_listing(doc)
+
+
+@api_router.post("/admin/listings")
+async def admin_create_listing(payload: ListingCreate, admin=Depends(require_admin)):
+    listing = Listing(**payload.model_dump())
+    doc = listing.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    await db.listings.insert_one(doc)
+    return _pub_listing({k: v for k, v in doc.items() if k != "_id"})
+
+
+@api_router.get("/admin/listings")
+async def admin_list_listings(admin=Depends(require_admin)):
+    docs = await db.listings.find({}, {"_id": 0}).to_list(500)
+    return docs  # admin can see hote_email
+
+
+@api_router.put("/admin/listings/{listing_id}")
+async def admin_update_listing(
+    listing_id: str, payload: ListingCreate, admin=Depends(require_admin)
+):
+    res = await db.listings.update_one(
+        {"id": listing_id}, {"$set": payload.model_dump()}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    return doc
+
+
+@api_router.delete("/admin/listings/{listing_id}")
+async def admin_delete_listing(listing_id: str, admin=Depends(require_admin)):
+    res = await db.listings.delete_one({"id": listing_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+@api_router.patch("/admin/listings/{listing_id}/toggle")
+async def admin_toggle_listing(listing_id: str, admin=Depends(require_admin)):
+    doc = await db.listings.find_one({"id": listing_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+    new_state = not bool(doc.get("disponible", True))
+    await db.listings.update_one({"id": listing_id}, {"$set": {"disponible": new_state}})
+    return {"id": listing_id, "disponible": new_state}
+
+
+# ---------- Reservations ----------
+def _nights(date_arrivee: str, date_depart: str) -> int:
+    try:
+        a = datetime.fromisoformat(date_arrivee)
+        b = datetime.fromisoformat(date_depart)
+        n = (b.date() - a.date()).days
+        return max(1, n)
+    except Exception:
+        return 1
+
+
+@api_router.post("/reservations")
+async def create_reservation(payload: ReservationCreate, user=Depends(require_user)):
+    listing = await db.listings.find_one({"id": payload.logement_id}, {"_id": 0})
+    if not listing:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    if not listing.get("disponible", True):
+        raise HTTPException(status_code=400, detail="Listing unavailable")
+
+    nights = _nights(payload.date_arrivee, payload.date_depart)
+    montant = round(float(listing["prix_nuit"]) * nights, 2)
+
+    reservation = Reservation(
+        user_id=user["user_id"],
+        logement_id=payload.logement_id,
+        name=payload.name,
+        email=payload.email,
+        date_arrivee=payload.date_arrivee,
+        date_depart=payload.date_depart,
+        voyageurs=payload.voyageurs,
+        montant=montant,
+        statut="pending",
+    )
+    doc = reservation.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    await db.reservations.insert_one(doc)
+
+    # Fire Make.com webhook (host email kept backend only)
+    if MAKE_WEBHOOK_URL:
+        try:
+            async with httpx.AsyncClient() as hc:
+                await hc.post(
+                    MAKE_WEBHOOK_URL,
+                    json={
+                        "name": payload.name,
+                        "email": payload.email,
+                        "logement": listing["titre"],
+                        "ville": listing["ville"],
+                        "date_arrivee": payload.date_arrivee,
+                        "date_depart": payload.date_depart,
+                        "voyageurs": payload.voyageurs,
+                        "montant": montant,
+                        "stripe_link": "",
+                        "hote_email": listing.get("hote_email", ""),
+                        "reservation_id": reservation.id,
+                    },
+                    timeout=10.0,
+                )
+        except Exception as e:
+            logger.warning(f"Make webhook failed: {e}")
+
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    return out
+
+
+@api_router.get("/reservations/me")
+async def my_reservations(user=Depends(require_user)):
+    docs = await db.reservations.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(
+        200
+    )
+    return docs
+
+
+@api_router.get("/admin/reservations")
+async def admin_reservations(admin=Depends(require_admin)):
+    docs = await db.reservations.find({}, {"_id": 0}).to_list(500)
+    return docs
+
+
+# ---------- Payments ----------
+def _get_stripe(host_url: str) -> StripeCheckout:
+    webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
+    return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+
+@api_router.post("/payments/checkout")
+async def create_checkout(
+    payload: CheckoutRequest, request: Request, user=Depends(require_user)
+):
+    reservation = await db.reservations.find_one(
+        {"id": payload.reservation_id, "user_id": user["user_id"]}, {"_id": 0}
+    )
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    if reservation.get("statut") == "paid":
+        raise HTTPException(status_code=400, detail="Already paid")
+
+    amount = float(reservation["montant"])
+    origin = payload.origin_url.rstrip("/")
+    success_url = f"{origin}/payment-success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/listings/{reservation['logement_id']}?cancelled=1"
+
+    host_url = str(request.base_url)
+    stripe_checkout = _get_stripe(host_url)
+    req = CheckoutSessionRequest(
+        amount=amount,
+        currency="eur",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "reservation_id": reservation["id"],
+            "user_id": user["user_id"],
+            "email": user["email"],
+        },
+    )
+    session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(req)
+
+    pt = PaymentTransaction(
+        session_id=session.session_id,
+        reservation_id=reservation["id"],
+        user_id=user["user_id"],
+        email=user["email"],
+        amount=amount,
+        currency="eur",
+        payment_status="initiated",
+        status="open",
+        metadata={"reservation_id": reservation["id"]},
+    )
+    doc = pt.model_dump()
+    doc["created_at"] = doc["created_at"].isoformat()
+    await db.payment_transactions.insert_one(doc)
+
+    await db.reservations.update_one(
+        {"id": reservation["id"]},
+        {"$set": {"stripe_link": session.url, "stripe_session_id": session.session_id}},
+    )
+
+    return {"url": session.url, "session_id": session.session_id}
+
+
+@api_router.get("/payments/status/{session_id}")
+async def payment_status(session_id: str, request: Request):
+    pt = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not pt:
+        raise HTTPException(status_code=404, detail="Unknown session")
+
+    host_url = str(request.base_url)
+    stripe_checkout = _get_stripe(host_url)
+    status: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+
+    # Update transaction only if not already paid
+    if pt.get("payment_status") != "paid":
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "payment_status": status.payment_status,
+                    "status": status.status,
+                }
+            },
+        )
+        if status.payment_status == "paid":
+            await db.reservations.update_one(
+                {"id": pt["reservation_id"]},
+                {"$set": {"statut": "paid"}},
+            )
+
+    reservation = await db.reservations.find_one(
+        {"id": pt["reservation_id"]}, {"_id": 0}
+    )
+    return {
+        "session_id": session_id,
+        "payment_status": status.payment_status,
+        "status": status.status,
+        "amount": status.amount_total / 100.0 if status.amount_total else pt["amount"],
+        "currency": status.currency,
+        "reservation": reservation,
+    }
+
+
+@api_router.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    try:
+        host_url = str(request.base_url)
+        stripe_checkout = _get_stripe(host_url)
+        evt = await stripe_checkout.handle_webhook(body, sig)
+    except Exception as e:
+        logger.warning(f"Webhook err: {e}")
+        return {"ok": False}
+
+    if evt.session_id:
+        await db.payment_transactions.update_one(
+            {"session_id": evt.session_id},
+            {"$set": {"payment_status": evt.payment_status}},
+        )
+        if evt.payment_status == "paid":
+            pt = await db.payment_transactions.find_one(
+                {"session_id": evt.session_id}, {"_id": 0}
+            )
+            if pt:
+                await db.reservations.update_one(
+                    {"id": pt["reservation_id"]}, {"$set": {"statut": "paid"}}
+                )
+    return {"ok": True}
+
+
+# ---------- Health ----------
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"app": "ZenStay", "status": "ok"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+# ---------- Seed ----------
+SEED_LISTINGS = [
+    {
+        "titre": "Cabane sylvestre — Forêt de Brocéliande",
+        "titre_en": "Forest cabin — Brocéliande woods",
+        "ville": "Paimpont",
+        "pays": "France",
+        "prix_nuit": 168.0,
+        "note": 4.9,
+        "db_nuit": 24,
+        "image_url": "https://images.unsplash.com/photo-1775806577799-43d0d7efa67e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwyfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Une cabane en bois nichée sous les pins, baignée d'un silence presque total. Cheminée, vue sur lac.",
+        "description_en": "A wooden cabin nestled under pines, bathed in near-total silence. Fireplace, lake view.",
+        "hote_email": "marie.host@zenstay.com",
+    },
+    {
+        "titre": "Maison blanche — Île de Folegandros",
+        "titre_en": "White house — Folegandros island",
+        "ville": "Folegandros",
+        "pays": "Grèce",
+        "prix_nuit": 245.0,
+        "note": 4.95,
+        "db_nuit": 22,
+        "image_url": "https://images.unsplash.com/photo-1767211664493-90841f9d778b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Maison de pierre face à la mer Égée. Aucune route à proximité, juste le souffle du vent.",
+        "description_en": "Stone house facing the Aegean sea. No nearby road, just the breath of the wind.",
+        "hote_email": "nikos.host@zenstay.com",
+    },
+    {
+        "titre": "Refuge bois — Vallée du Queyras",
+        "titre_en": "Wooden refuge — Queyras Valley",
+        "ville": "Saint-Véran",
+        "pays": "France",
+        "prix_nuit": 132.0,
+        "note": 4.85,
+        "db_nuit": 28,
+        "image_url": "https://images.unsplash.com/photo-1699210025833-07318c121bf0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwzfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Refuge isolé à 2040m d'altitude. Nuits étoilées, silence minéral.",
+        "description_en": "Remote refuge at 2040m altitude. Starlit nights, mineral silence.",
+        "hote_email": "claire.host@zenstay.com",
+    },
+    {
+        "titre": "Villa minérale — Côte Amalfitaine",
+        "titre_en": "Mineral villa — Amalfi Coast",
+        "ville": "Praiano",
+        "pays": "Italie",
+        "prix_nuit": 320.0,
+        "note": 4.92,
+        "db_nuit": 30,
+        "image_url": "https://images.unsplash.com/photo-1775974861298-8fe164a40024?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHw0fHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Villa creusée dans la falaise, terrasse suspendue au-dessus du Tyrrhénien.",
+        "description_en": "Cliff-carved villa, terrace suspended above the Tyrrhenian.",
+        "hote_email": "luca.host@zenstay.com",
+    },
+    {
+        "titre": "Bothy nordique — Lofoten",
+        "titre_en": "Nordic bothy — Lofoten",
+        "ville": "Reine",
+        "pays": "Norvège",
+        "prix_nuit": 198.0,
+        "note": 4.88,
+        "db_nuit": 26,
+        "image_url": "https://images.unsplash.com/photo-1699209148943-acacf2821f33?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwxfHxjb3p5JTIwZm9yZXN0JTIwY2FiaW4lMjBleHRlcmlvcnxlbnwwfHx8fDE3Nzg2NzI4MzN8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Rorbu rouge sur pilotis, fjord en arrière-plan, aurores boréales en hiver.",
+        "description_en": "Red stilted rorbu, fjord backdrop, northern lights in winter.",
+        "hote_email": "ingrid.host@zenstay.com",
+    },
+    {
+        "titre": "Piscine du large — Cap de Formentor",
+        "titre_en": "Ocean pool — Cap de Formentor",
+        "ville": "Pollença",
+        "pays": "Espagne",
+        "prix_nuit": 275.0,
+        "note": 4.9,
+        "db_nuit": 29,
+        "image_url": "https://images.unsplash.com/photo-1571635685743-db0db8e31d9a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxzZXJlbmUlMjBvY2VhbiUyMGhvdXNlJTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc3ODY3MjgzM3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Maison contemporaine, piscine à débordement face à la Méditerranée.",
+        "description_en": "Contemporary house, infinity pool facing the Mediterranean.",
+        "hote_email": "alba.host@zenstay.com",
+    },
+]
 
-# Include the router in the main app
+
+async def seed_data():
+    count = await db.listings.count_documents({})
+    if count == 0:
+        for l in SEED_LISTINGS:
+            obj = Listing(**l).model_dump()
+            obj["created_at"] = obj["created_at"].isoformat()
+            await db.listings.insert_one(obj)
+        logger.info("Seeded 6 listings")
+    # Seed admin user (no password required because Google Auth; admin via email)
+    existing_admin = await db.users.find_one({"email": ADMIN_EMAIL}, {"_id": 0})
+    if not existing_admin:
+        await db.users.insert_one(
+            {
+                "user_id": f"user_{uuid.uuid4().hex[:12]}",
+                "email": ADMIN_EMAIL,
+                "name": "ZenStay Admin",
+                "picture": None,
+                "role": "admin",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        logger.info("Seeded admin user")
+    # Seed test users
+    for em, nm in [("alice@zenstay.com", "Alice"), ("ben@zenstay.com", "Ben")]:
+        if not await db.users.find_one({"email": em}, {"_id": 0}):
+            await db.users.insert_one(
+                {
+                    "user_id": f"user_{uuid.uuid4().hex[:12]}",
+                    "email": em,
+                    "name": nm,
+                    "picture": None,
+                    "role": "user",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+
+@app.on_event("startup")
+async def on_startup():
+    await seed_data()
+
+
+# ---------- Mount & CORS ----------
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -1,0 +1,46 @@
+{
+  "summary": "First testing run for ZenStay. Backend: 15/16 pytest cases pass (94%). Frontend: all major flows verified (landing, 6 listing cards, dB badges, FR/EN language toggle, dark mode, listing detail with login-gated booking, /admin guard redirect). One backend failure: GET /api/payments/status/{session_id} returns 500 due to a third-party library (emergentintegrations) pydantic validation bug on Stripe metadata. Checkout creation itself works and persists payment_transactions.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/payments/status/{session_id}",
+        "issue": "Returns 500. emergentintegrations CheckoutStatusResponse validation fails: 'metadata Input should be a valid dictionary [type=dict_type, input_value=<StripeObject ...>]'. Stripe SDK returns StripeObject for metadata; the Pydantic model in emergentintegrations expects dict. Server.py code path is correct; failure is inside library at checkout.py:204. Webhook-driven status updates still work (reservation.statut moves to paid on webhook event), but client-polled /payments/status endpoint is broken until lib fix or a workaround is added.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_zenstay.py",
+    "/app/test_reports/pytest/zs_results.xml"
+  ],
+  "action_items": [
+    "Fix GET /api/payments/status/{session_id}: either (a) catch CheckoutError and fall back to retrieving stripe.checkout.Session.retrieve directly via the stripe SDK and coerce metadata to dict, or (b) cast metadata to dict before constructing CheckoutStatusResponse inside a thin wrapper, or (c) report/upgrade the emergentintegrations library. The success-page polling on the frontend will currently fail until fixed."
+  ],
+  "critical_code_review_comments": [
+    "auth_session sets cookie with samesite=none + secure=True which is correct for cross-site preview, but the cookie is sent via XHR only when frontend uses credentials: 'include' — confirm AuthContext uses withCredentials/credentials include for /api/auth/me (Bearer fallback is supported so OK either way).",
+    "Reservation montant uses _nights which forces minimum 1 night even if dates are inverted; consider returning 400 for date_depart <= date_arrivee.",
+    "MAKE webhook posts hote_email; ensure that is intentional (it is, for host notification — correct per spec).",
+    "server.py is 678 lines — still manageable but approaching the 700-line limit recommended for split into routers/auth/payments modules.",
+    "No rate-limiting or idempotency on POST /api/reservations or /payments/checkout (out of scope for MVP)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_zenstay.py"
+  ],
+  "success_rate": {
+    "backend": "94% (15/16)",
+    "frontend": "100% on smoke checks"
+  },
+  "test_credentials": "admin@zenstay.com (role=admin, seeded). Backend testing uses manually inserted user_sessions tokens (test_admin_session_zs, test_user_session_zs) via Authorization: Bearer header, cleaned up after run. Real auth E2E not automatable (Emergent Google OAuth).",
+  "seed_data_creation": "Seed listings (6) and seed users (admin/alice/ben) are created at backend startup; tests rely on them being present.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite in /app/backend/tests/test_zenstay.py covers auth (cookie+Bearer), public listings privacy (hote_email removed), reservation auth+computation, admin CRUD/toggle/list, Stripe checkout creation and 404 on unknown session. Only the /payments/status/{session_id} test fails — confirm fix by re-running pytest after main agent patches the Stripe status handler.",
+  "rca of the issue": "RCA: emergentintegrations 0.x (checkout.py:204) constructs CheckoutStatusResponse(Pydantic BaseModel) from Stripe SDK Session object. Stripe SDK returns `metadata` as a `StripeObject` (dict-like but not a true dict subclass for Pydantic v2 strict typing). Pydantic v2 dict_type validator rejects it. Reproduction: POST /api/payments/checkout (works), then GET /api/payments/status/{session_id} -> 500. Mitigation in app code: wrap stripe_checkout.get_checkout_status in try/except CheckoutError, on failure use stripe SDK directly: `s = stripe.checkout.Session.retrieve(session_id)`; build response with `metadata=dict(s.metadata or {})` and payment_status/status from `s`."
+}
