@@ -1,56 +1,51 @@
 # ZenStay — PRD
 
 ## Problem Statement
-ZenStay is a booking platform for peaceful stays (< 35 dB at night) in nature or near the sea. MVP: browse → login → reserve → pay → confirmation.
+Booking platform for peaceful stays (< 35 dB at night) in nature or near the sea. End-to-end: browse → login → reserve → pay → confirmation.
 
 ## Architecture
 - Backend: FastAPI + MongoDB (motor), routes prefixed `/api`
 - Frontend: React + react-router + Tailwind + shadcn/ui
-- Auth: Emergent-managed Google OAuth (session_token cookies, 7-day expiry)
-- Payments: Stripe Checkout via `emergentintegrations` + stripe SDK fallback
-- Automation: Make.com webhook on bookings + host contacts
-- Email: Resend (booking confirmation)
-- Object Storage: Emergent (admin listing image uploads)
+- Auth: Emergent-managed Google OAuth (session_token cookies + Bearer)
+- Payments: Stripe Checkout + SDK fallback
+- Automation: Make.com webhook (bookings + host contacts)
+- Email: Resend (booking flow + invoice)
+- Object Storage: Emergent (listing image uploads)
 
 ## User personas
-- Traveler: browse → book → pay → receives confirmation email
-- Host applicant: contact form → admin notified via Make webhook
-- Admin: full CRUD listings (with image upload), view bookings, view host contacts
-
-## Core requirements (all delivered)
-- 6 seeded listings, 2 test users, 1 admin user
-- `< 35 dB` badge prominent on every card
-- Bilingual FR/EN, dark/light mode
-- hote_email never exposed to public/user frontends
-- Stripe checkout in EUR, success/cancel routes wired
+- Traveler: browse → book → pay → invoice email + web invoice
+- Host (auto-detected: email == listing.hote_email): private portal with stats, listings CRUD, reservations
+- Admin: full CRUD + host contacts
 
 ## Implemented (Feb 2026)
 
-### Iteration 1 — MVP
-- Auth (Emergent OAuth + cookie+Bearer sessions)
-- Listings CRUD (admin), reservations + Make webhook, Stripe checkout + status polling
-- Landing, Listings, ListingDetail, PaymentSuccess, Dashboard, Admin pages
-- 16/16 backend tests pass
+### Iter 1 — MVP
+Auth, listings CRUD, reservations + Make webhook, Stripe checkout + polling. 16/16 tests.
 
-### Iteration 2 — Bug fix
-- Fixed `/api/payments/status` for Stripe SDK metadata bug
+### Iter 2 — Stripe fix
+Patched `/api/payments/status` for emergentintegrations metadata bug (Stripe SDK fallback).
 
-### Iteration 3 — Polish & growth
-- **Date range picker** (shadcn Calendar in Popover, 2-month view, FR/EN locale)
-- **Filters** on /listings (country select, price slider, dB slider)
-- **Host contact page** (`/host`) with formulaire → POST `/api/host-contact` → Make webhook
-- **Resend confirmation email** sent on Stripe `paid` event (HTML editorial template)
-- **Object storage upload** for listing images (admin `/api/admin/upload` + public `/api/files/{path}`)
-- 27/27 backend tests pass (16 regression + 11 new)
+### Iter 3 — Polish & growth
+Date range picker (shadcn Calendar), filters on /listings, host contact page, Resend confirmation, object storage upload. 27/27 tests.
+
+### Iter 4 — Emails
+Host notification on new + paid, client invoice email with invoice_number `ZS-YYYYMM-XXXXXX`, idempotent finalize helper with `matched_count` race gate. 39/39 tests.
+
+### Iter 5 — Invoice & Host portal
+- **Public invoice** `/invoices/:invoice_number` — print-friendly (`@media print` CSS), invoice number as unguessable secret, hote_email stripped
+- **Host portal** `/host-portal` — auto-detected via email match, tabs (Listings / Reservations / Revenue), full edit (hote_email locked server-side), toggle availability, revenue stats
+- Navbar conditional "Espace hôte" link when `is_host=true`
+- Dashboard exposes invoice link per paid booking
+- Email invoice now embeds "Voir & imprimer la facture" CTA via `app_origin` stored on payment_transactions
+- 60/60 backend tests (39 regression + 21 iter5)
 
 ## Backlog
-- P1: Host portal post-onboarding (separate from admin)
-- P2: Multi-currency, EUR locale formatting per language
-- P2: Email confirmation to host on new booking
-- P2: Stripe webhook signature verification end-to-end test
-- P2: Map view & favorites
-- P3: Refer-a-host program (revenue-share)
+- P1: ErrorBoundary at AppRouter root
+- P1: ESLint pre-commit (no-undef, no-unreachable)
+- P2: PDF download of invoice (instead of print)
+- P2: Multi-currency
+- P2: Host can adjust dates/cancel reservations on their listings
+- P3: Refer-a-host program
 
 ## Next tasks
-- Real Google OAuth e2e test setup (admin headless flow)
-- Migrate `@app.on_event` → lifespan (deprecation)
+- Visual e2e verification via real Google sign-in (Playwright cookie injection limited)
