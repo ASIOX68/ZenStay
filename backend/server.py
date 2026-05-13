@@ -14,12 +14,21 @@ from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout,
-    CheckoutSessionResponse,
-    CheckoutStatusResponse,
-    CheckoutSessionRequest,
-)
+try:
+    from emergentintegrations.payments.stripe.checkout import (
+        StripeCheckout,
+        CheckoutSessionResponse,
+        CheckoutStatusResponse,
+        CheckoutSessionRequest,
+    )
+    _HAS_EMERGENT_INTEGRATIONS = True
+except ImportError:
+    StripeCheckout = None  # type: ignore[assignment]
+    CheckoutSessionResponse = Any
+    CheckoutStatusResponse = Any
+    CheckoutSessionRequest = Any
+    _HAS_EMERGENT_INTEGRATIONS = False
+
 import stripe as stripe_sdk
 
 ROOT_DIR = Path(__file__).parent
@@ -657,9 +666,11 @@ async def _mark_reservation_paid_and_notify(reservation_id: str, app_origin: Opt
     await send_booking_confirmation(res, listing, app_origin=app_origin)
     await send_host_notification(res, listing, event="paid")
 
-def _get_stripe(host_url: str) -> StripeCheckout:
-    webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
-    return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+def _get_stripe(host_url: str) -> Optional[StripeCheckout]:
+    if _HAS_EMERGENT_INTEGRATIONS and StripeCheckout is not None:
+        webhook_url = f"{host_url.rstrip('/')}/api/webhook/stripe"
+        return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    return None
 
 
 @api_router.post("/payments/checkout")
@@ -681,21 +692,47 @@ async def create_checkout(
 
     host_url = str(request.base_url)
     stripe_checkout = _get_stripe(host_url)
-    req = CheckoutSessionRequest(
-        amount=amount,
-        currency="eur",
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            "reservation_id": reservation["id"],
-            "user_id": user["user_id"],
-            "email": user["email"],
-        },
-    )
-    session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(req)
+    metadata = {
+        "reservation_id": reservation["id"],
+        "user_id": user["user_id"],
+        "email": user["email"],
+    }
+
+    if stripe_checkout is not None:
+        req = CheckoutSessionRequest(
+            amount=amount,
+            currency="eur",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+        )
+        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(req)
+        session_id = session.session_id
+        session_url = session.url
+    else:
+        stripe_sdk.api_key = STRIPE_API_KEY
+        session = stripe_sdk.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="payment",
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "eur",
+                        "product_data": {"name": "ZenStay reservation"},
+                        "unit_amount": int(amount * 100),
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+        )
+        session_id = session.id
+        session_url = session.url
 
     pt = PaymentTransaction(
-        session_id=session.session_id,
+        session_id=session_id,
         reservation_id=reservation["id"],
         user_id=user["user_id"],
         email=user["email"],
@@ -712,10 +749,10 @@ async def create_checkout(
 
     await db.reservations.update_one(
         {"id": reservation["id"]},
-        {"$set": {"stripe_link": session.url, "stripe_session_id": session.session_id}},
+        {"$set": {"stripe_link": session_url, "stripe_session_id": session_id}},
     )
 
-    return {"url": session.url, "session_id": session.session_id}
+    return {"url": session_url, "session_id": session_id}
 
 
 @api_router.get("/payments/status/{session_id}")
